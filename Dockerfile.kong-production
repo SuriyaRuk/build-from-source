@@ -1,0 +1,72 @@
+# =============================================================================
+#  Dockerfile.kong-production
+#  Production Kong image based on patched Kong OSS 3.9.1
+#  Base: ghcr.io/suriyaruk/kong-oss-3.9.1-patch:3.9.1
+# =============================================================================
+FROM ghcr.io/suriyaruk/kong-oss-3.9.1-patch:3.9.1
+
+LABEL maintainer="suriya.ruk@tel.co.th" \
+      org.opencontainers.image.title="Kong Gateway OSS" \
+      org.opencontainers.image.version="3.9.1" \
+      org.opencontainers.image.description="Kong OSS 3.9.1 production image (patched)"
+
+# ─── Switch to root for setup ─────────────────────────────────────────────────
+USER root
+
+# ─── Database (PostgreSQL) ────────────────────────────────────────────────────
+ENV KONG_DATABASE="postgres"
+ENV KONG_PG_HOST="postgres"
+ENV KONG_PG_PORT="5432"
+ENV KONG_PG_USER="kong"
+ENV KONG_PG_PASSWORD=""
+ENV KONG_PG_DATABASE="kong"
+ENV KONG_PG_SSL="off"
+
+# ─── Admin API ────────────────────────────────────────────────────────────────
+ENV KONG_ADMIN_LISTEN="0.0.0.0:8001, 0.0.0.0:8444 ssl"
+ENV KONG_ADMIN_ACCESS_LOG="/dev/stdout"
+ENV KONG_ADMIN_ERROR_LOG="/dev/stderr"
+
+# ─── Proxy ────────────────────────────────────────────────────────────────────
+ENV KONG_PROXY_LISTEN="0.0.0.0:8000, 0.0.0.0:8443 ssl"
+ENV KONG_PROXY_ACCESS_LOG="/dev/stdout"
+ENV KONG_PROXY_ERROR_LOG="/dev/stderr"
+
+# ─── Cluster / Status ─────────────────────────────────────────────────────────
+ENV KONG_CLUSTER_LISTEN="off"
+ENV KONG_STATUS_LISTEN="0.0.0.0:8100"
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+ENV KONG_LOG_LEVEL="notice"
+
+# ─── Performance ──────────────────────────────────────────────────────────────
+ENV KONG_NGINX_WORKER_PROCESSES="auto"
+ENV KONG_UPSTREAM_KEEPALIVE_POOL_SIZE="512"
+
+# ─── Lua / Plugin paths ───────────────────────────────────────────────────────
+# ENV KONG_PLUGINS="bundled,my-custom-plugin"
+# ENV KONG_LUA_PACKAGE_PATH="/opt/kong/plugins/?.lua;;"
+
+# ─── (Optional) Copy custom plugins ──────────────────────────────────────────
+# COPY ./plugins /opt/kong/plugins
+# RUN chown -R kong:kong /opt/kong/plugins
+
+# ─── (Optional) Custom kong.conf ─────────────────────────────────────────────
+# COPY ./kong.conf /etc/kong/kong.conf
+
+# ─── Expose ports ─────────────────────────────────────────────────────────────
+# 8000  – HTTP proxy
+# 8443  – HTTPS proxy
+# 8001  – Admin API (HTTP)
+# 8444  – Admin API (HTTPS)
+# 8100  – Status / health
+EXPOSE 8000 8443 8001 8444 8100
+
+# ─── Healthcheck ──────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=10s --timeout=10s --retries=5 --start-period=30s \
+  CMD kong health || exit 1
+
+# ─── Entrypoint ───────────────────────────────────────────────────────────────
+# ใช้ entrypoint ที่มาพร้อมกับ base image (รัน kong migrations + kong start)
+# ถ้าต้องการ migrate ก่อน start ให้ใช้: ENTRYPOINT ["kong", "docker-start"]
+ENTRYPOINT ["kong", "docker-start"]
