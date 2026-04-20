@@ -591,6 +591,43 @@ else:
 PYEOF
 fi
 
+# ─── Patch L: fix Makefile cascade — Dockerfile.kong runs even when build-openresty fails ──
+# In actual-build-kong target, semicolons (;) after `$(MAKE) build-openresty && ...`
+# cause `echo ... > github-token` and `$(DOCKER_COMMAND) -f Dockerfile.kong` to run
+# regardless of whether build-openresty succeeded. This means a failed openresty build
+# produces a confusing secondary error about the base image not found. Fix: replace ; with &&
+MAKEFILE_PATH="${BUILD_TOOLS_DIR}/Makefile"
+if [ -f "${MAKEFILE_PATH}" ]; then
+  log "Patching Makefile: fix cascade semicolons in actual-build-kong target"
+  python3 - "${MAKEFILE_PATH}" << 'PYEOF'
+import sys, pathlib
+
+f = pathlib.Path(sys.argv[1])
+text = f.read_text()
+
+OLD = (
+    "\t( $(MAKE) build-openresty && \\\n"
+    "\t-rm github-token; \\\n"
+    "\techo $$GITHUB_TOKEN > github-token; \\\n"
+    "\t$(DOCKER_COMMAND) -f dockerfiles/Dockerfile.kong \\\n"
+)
+NEW = (
+    "\t( $(MAKE) build-openresty && \\\n"
+    "\t-rm github-token; \\\n"
+    "\techo $$GITHUB_TOKEN > github-token && \\\n"
+    "\t$(DOCKER_COMMAND) -f dockerfiles/Dockerfile.kong \\\n"
+)
+
+if NEW.split('\n')[2] in text:
+    print("  -> already patched, skipping")
+elif OLD in text:
+    f.write_text(text.replace(OLD, NEW, 1))
+    print("  -> semicolons fixed to && in actual-build-kong")
+else:
+    print("  -> pattern not found, skipping (may have changed upstream)")
+PYEOF
+fi
+
 # ─── Remove stale openresty Docker image so it rebuilds with the new patch ────
 # The openresty image was cached from a previous run in which the OpenResty build
 # silently failed (due to the set -e/ typo).  That cached image has no nginx or
@@ -613,10 +650,24 @@ if [ -n "${OPENRESTY_TAG}" ]; then
   docker rmi -f "${OPENRESTY_TAG}" 2>/dev/null || true
 fi
 
-# ─── 7. Use legacy Docker builder (DOCKER_BUILDKIT=0) ─────────────────────────
-# Legacy builder resolves FROM images from the local Docker daemon image store
-# first, without contacting any registry.  This is the only reliable way to
-# chain intermediate images (openresty → kong) locally on a Mac.
+# ─── 7. Pre-build disk space check and Docker cleanup ────────────────────────
+# Building OpenResty + Kong requires ~8-10 GB of Docker layer space.
+# Prune dangling images and stopped containers to reclaim space before build.
+log "Pruning dangling Docker images and stopped containers to free disk space ..."
+docker image prune -f 2>/dev/null || true
+docker container prune -f 2>/dev/null || true
+AVAIL_KB=$(df --output=avail / 2>/dev/null | tail -1 || echo 0)
+AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
+if [ "${AVAIL_GB}" -lt 8 ]; then
+  log "WARNING: Only ${AVAIL_GB}GB free on /. Build may fail with 'no space left on device'."
+  log "         Run: docker system prune -af   to free more space before retrying."
+fi
+
+# ─── 7b_env. Use buildx with --load so intermediate images land in local daemon ──
+# Docker 23+ routes 'docker build' through buildx by default. Without --load,
+# built images stay in buildx cache and are invisible to 'docker run'.
+# DOCKER_BUILDKIT=0 is kept for compatibility but buildx build --load is used
+# explicitly via DOCKER_COMMAND to guarantee local daemon availability.
 export DOCKER_DEFAULT_PLATFORM=linux/amd64
 export DOCKER_BUILDKIT=0
 
@@ -670,7 +721,13 @@ log "  DOCKER_REPOSITORY   = ${DOCKER_REPOSITORY}"
 log ""
 
 # Pass TARGETPLATFORM=linux/amd64 so fpm-entrypoint.sh names the .deb correctly.
-LOCAL_DOCKER_CMD="docker build --build-arg TARGETPLATFORM=${TARGET_PLATFORM}"
+# --load is required with Docker 23+ (buildx default) so the built image is stored
+# in the local daemon and the subsequent `docker run` step can find it.
+# --context=default + --builder default pins to the local Docker daemon so
+# locally-built intermediate images (e.g. kong-build-local-amd64:openresty-...)
+# are always resolved correctly, regardless of which Docker context or buildx
+# builder is currently active.
+LOCAL_DOCKER_CMD="docker --context=default buildx build --builder default --load --build-arg TARGETPLATFORM=${TARGET_PLATFORM}"
 
 make -C "${BUILD_TOOLS_DIR}" package-kong \
   KONG_SOURCE_LOCATION="${KONG_SOURCE_DIR}" \
