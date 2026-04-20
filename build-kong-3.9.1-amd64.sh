@@ -80,6 +80,24 @@ else
   log "Kong source already present at ${KONG_SOURCE_DIR}"
 fi
 
+# ─── 2b. Patch Kong source: fix set_current_peer API mismatch ─────────────────
+# lua-resty-core 0.1.33rc2 (bundled with OpenResty 1.29.2.3) changed the API of
+# set_current_peer: argument #3 is now a string (SNI host) NOT a table.
+# Kong 3.9.1 still passes pool_opts table as arg #3 (old Kong-patched API).
+# Fix: remove pool_opts from set_current_peer — keepalive is handled separately
+# by enable_keepalive() on the next line anyway.
+KONG_INIT_LUA="${KONG_SOURCE_DIR}/kong/init.lua"
+if [ -f "${KONG_INIT_LUA}" ]; then
+  if grep -q "set_current_peer(balancer_data_ip, balancer_data_port, pool_opts)" "${KONG_INIT_LUA}"; then
+    log "Patching kong/init.lua: remove pool_opts from set_current_peer (API mismatch fix) ..."
+    sed -i 's/local ok, err = set_current_peer(balancer_data_ip, balancer_data_port, pool_opts)/local ok, err = set_current_peer(balancer_data_ip, balancer_data_port)/' \
+      "${KONG_INIT_LUA}"
+    log "  -> patched: set_current_peer(ip, port) [pool_opts removed]"
+  else
+    log "  -> kong/init.lua already patched or pattern changed, skipping"
+  fi
+fi
+
 # ─── 3. Verify .requirements exists ───────────────────────────────────────────
 if [ ! -f "${KONG_SOURCE_DIR}/.requirements" ]; then
   err "Kong .requirements file not found in ${KONG_SOURCE_DIR}"
